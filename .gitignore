@@ -1,0 +1,20 @@
+# Configuration files with sensitive data
+configuracoes/*
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environment files
+.env
+.venv
+env/
+venv/
+
+# IDE files
+.vscode/
+.idea/
+
+# Local data files
+data/*.csv
