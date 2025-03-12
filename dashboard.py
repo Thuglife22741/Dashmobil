@@ -842,7 +842,9 @@ def dashboard_bi():
     # Carregar arquivos CSV
     try:
         df_conversas = pd.read_csv('data/relatorios_conversas.csv')
-        df_ddd_estado = pd.read_csv(Path(__file__).parent / 'data' / 'ddd_estado_brasil.csv')
+        # Ensure data directory path is resolved correctly
+        data_dir = Path(__file__).parent.resolve() / 'data'
+        df_ddd_estado = pd.read_csv(data_dir / 'ddd_estado_brasil.csv', encoding='utf-8')
     except Exception as e:
         st.error(f"Erro ao carregar arquivos CSV: {e}")
         st.info("Certifique-se de que os arquivos CSV estão presentes na pasta 'data'")
