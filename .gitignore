@@ -17,4 +17,5 @@ venv/
 .idea/
 
 # Local data files
-data/*.csv
+# Uncommented to track CSV files
+# data/*.csv
