@@ -8,6 +8,7 @@ from openai import OpenAI
 from datetime import datetime, timedelta
 import pickle
 from pathlib import Path
+import time
 import streamlit.runtime.scriptrunner.script_runner as script_runner
 script_runner.SCRIPT_RUN_CONTEXT_ATTR_NAME = "mock_script_run_context"
 
@@ -90,19 +91,43 @@ if st.session_state['api_key']:
 else:
     st.warning("A chave da API OpenAI não foi fornecida. Vá para 'Configurações' para inserir sua chave.")
 
+# Função para tentar estabelecer conexão com Redis
+def connect_to_redis(url, password, max_retries=3):
+    for attempt in range(max_retries):
+        try:
+            # Remove 'http:' from the URL if present and ensure proper Redis URL format
+            cleaned_url = url.replace('http:', '').replace('https:', '')
+            if cleaned_url.startswith('//'):
+                cleaned_url = cleaned_url[2:]
+            client = redis.Redis.from_url(
+                f'redis://default:{password}@{cleaned_url}',
+                socket_timeout=5,
+                socket_connect_timeout=5
+            )
+            client.ping()
+            return client, None
+        except redis.ConnectionError as e:
+            if attempt == max_retries - 1:
+                return None, f"Erro de conexão após {max_retries} tentativas: {e}"
+            time.sleep(1)
+        except Exception as e:
+            return None, f"Erro inesperado: {e}"
+    return None, "Número máximo de tentativas excedido"
+
 # Conectar ao Redis somente se as variáveis estiverem preenchidas
 if st.session_state['redis_url'] and st.session_state['redis_password']:
-    try:
-        redis_client = redis.Redis.from_url(
-            f'redis://default:{st.session_state["redis_password"]}@{st.session_state["redis_url"]}'
-        )
-        redis_client.ping()
+    redis_client, error = connect_to_redis(
+        st.session_state['redis_url'],
+        st.session_state['redis_password']
+    )
+    if redis_client:
         st.toast("Conexão com Redis estabelecida com sucesso.", icon="✅")
-    except Exception as e:
-        st.error(f"Erro ao conectar ao Redis: {e}")
+    else:
+        st.error(f"Erro ao conectar ao Redis: {error}")
         st.stop()
 else:
     st.warning("As credenciais do Redis estão incompletas. Por favor, preencha os campos de URL e senha do Redis na seção de configurações.")
+
 
 
 # Conectar AI_NAME E AI_OBJECTIVES somente se as variáveis estiverem preenchidas
@@ -142,15 +167,34 @@ def get_historic_phone_numbers(_redis_client):
             message_data = _redis_client.hgetall(key)
             if b'phoneNumber' in message_data and b'createdAt' in message_data:
                 phone_number = message_data[b'phoneNumber'].decode('utf-8')
-                created_at = int(message_data[b'createdAt'].decode('utf-8'))
-                if phone_number not in phone_numbers_with_timestamps or created_at > phone_numbers_with_timestamps[phone_number]:
-                    phone_numbers_with_timestamps[phone_number] = created_at
+                try:
+                    created_at = float(message_data[b'createdAt'].decode('utf-8'))
+                    # Ensure the timestamp is in seconds, not milliseconds
+                    if created_at > 1e12:  # If timestamp is in milliseconds
+                        created_at = created_at / 1000
+                    # Convert timestamp to formatted date string with proper timezone handling
+                    created_at_str = datetime.fromtimestamp(created_at).strftime('%d/%m/%y %H:%M:%S')
+                    if phone_number not in phone_numbers_with_timestamps or created_at > phone_numbers_with_timestamps[phone_number]['timestamp']:
+                        phone_numbers_with_timestamps[phone_number] = {
+                            'timestamp': created_at,
+                            'formatted_date': created_at_str
+                        }
+                except (ValueError, TypeError) as e:
+                    print(f"Error converting timestamp for phone {phone_number}: {e}")
+                    # Use current time as fallback
+                    current_time = datetime.now()
+                    created_at = current_time.timestamp()
+                    created_at_str = current_time.strftime('%d/%m/%y %H:%M:%S')
+                    phone_numbers_with_timestamps[phone_number] = {
+                        'timestamp': created_at,
+                        'formatted_date': created_at_str
+                    }
         if cursor == 0:
             break
 
-    # Ordenar e retornar todos os históricos
-    sorted_phone_numbers = sorted(phone_numbers_with_timestamps.items(), key=lambda x: x[1], reverse=True)
-    historic_phone_numbers = [{'phone_number': phone, 'created_at': timestamp} for phone, timestamp in sorted_phone_numbers]
+    # Ordenar e retornar todos os históricos com data formatada
+    sorted_phone_numbers = sorted(phone_numbers_with_timestamps.items(), key=lambda x: x[1]['timestamp'], reverse=True)
+    historic_phone_numbers = [{'phone_number': phone, 'Data de Criação': data['formatted_date']} for phone, data in sorted_phone_numbers]
     return historic_phone_numbers
 
 # Adicionar um seletor de período à barra lateral
@@ -229,41 +273,74 @@ def painel_mensagem():
     def normalizar_data(data_string):
         try:
             # Verifica se a data está vazia ou contém uma mensagem de erro
-            if pd.isnull(data_string) or data_string.strip() == "" or "Erro" in data_string:
-                return ''  # Retornar uma string vazia se a data estiver ausente ou for uma mensagem de erro
-
-            # Tenta converter o valor para inteiro (timestamp UNIX)
+            if pd.isnull(data_string) or not data_string or data_string.strip() == "" or "Erro" in str(data_string):
+                return ''
+        
+            # Remove espaços extras e caracteres inválidos
+            data_string = str(data_string).strip()
+        
+            # Lista de formatos de data para tentar
+            date_formats = [
+                '%d/%m/%y %H:%M:%S',
+                '%d/%m/%y',
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%d'
+            ]
+        
+            # Tenta converter timestamp UNIX primeiro
             try:
-                data_timestamp = int(data_string)
-                # Converte o timestamp UNIX em uma data legível
-                data_formatada = pd.to_datetime(data_timestamp, unit='s')
-            except ValueError:
-                # Caso não seja um timestamp, tenta converter como data formatada
-                # Primeiro tenta com horário, depois sem horário
-                try:
-                    data_formatada = pd.to_datetime(data_string, format='%d/%m/%y %H:%M:%S', dayfirst=True)
-                except ValueError:
-                    # Se falhar, tenta sem o horário
-                    data_formatada = pd.to_datetime(data_string, format='%d/%m/%y', dayfirst=True)
-
-            # Retorna a data no formato 'DD/MM/YY HH:MM:SS' (se possível) ou apenas 'DD/MM/YY'
-            return data_formatada.strftime('%d/%m/%y %H:%M:%S') if ' ' in data_string else data_formatada.strftime('%d/%m/%y')
+                data_timestamp = float(data_string)
+                return pd.to_datetime(data_timestamp, unit='s').strftime('%d/%m/%y %H:%M:%S')
+            except (ValueError, TypeError):
+                # Se não for timestamp, tenta outros formatos
+                for fmt in date_formats:
+                    try:
+                        data_formatada = pd.to_datetime(data_string, format=fmt, dayfirst=True)
+                        return data_formatada.strftime('%d/%m/%y %H:%M:%S')
+                    except (ValueError, TypeError):
+                        continue
+        
+            # Se nenhum formato funcionar, tenta parse automático
+            try:
+                data_formatada = pd.to_datetime(data_string, dayfirst=True)
+                return data_formatada.strftime('%d/%m/%y %H:%M:%S')
+            except (ValueError, TypeError):
+                return ''
+        
         except Exception as e:
-            st.error(f"Erro ao converter a data: {data_string} - {e}")
+            print(f"Erro ao converter a data: {data_string} - {e}")
             return ''
 
-    # Carregar dados salvos do Redis ou session_state
+    # Carregar dados salvos do Redis ou session_state    
+    # Primeiro, obter os números históricos com timestamps
+    historic_data = get_historic_phone_numbers(redis_client)
+    
+    # Depois, carregar os dados salvos do Redis
     dados_salvos = restaurar_dados_do_redis(redis_client)
-
-    # Inicializar o DataFrame
     if 'df' not in st.session_state:
         if dados_salvos:
             df = pd.DataFrame(dados_salvos)
-            if 'Data de Criação' in df.columns:
-                df['Data de Criação'] = df['Data de Criação'].apply(lambda x: normalizar_data(x) if x else '')
-                df = df.sort_values(by='Data de Criação', ascending=False)
-            else:
-                df['Data de Criação'] = ''
+            
+            # Criar um dicionário de datas de criação dos números históricos
+            historic_dates = {item['phone_number']: item['Data de Criação'] for item in historic_data}
+            
+            # Atualizar as datas de criação no DataFrame
+            df['Data de Criação'] = df['Número de WhatsApp'].map(historic_dates)
+            
+            # Garantir que todas as datas estão no formato correto
+            df['Data_Normalizada'] = pd.to_datetime(
+                df['Data de Criação'],
+                format='%d/%m/%y %H:%M:%S',
+                errors='coerce'
+            )
+            
+            # Reordenar o DataFrame usando a coluna normalizada
+            df = df.sort_values(by='Data_Normalizada', ascending=False)
+            
+            # Formatar a coluna de exibição
+            df['Data de Criação'] = df['Data_Normalizada'].dt.strftime('%d/%m/%y %H:%M:%S')
+            df = df.drop('Data_Normalizada', axis=1)
+            
             st.session_state['df'] = df
         else:
             df = pd.DataFrame(columns=[
@@ -282,17 +359,39 @@ def painel_mensagem():
     # Definir a data atual 
     today = datetime.today()
 
-    # Criar série temporária com as datas convertidas de forma segura
-    temp_dates = pd.to_datetime(df['Data de Criação'], 
-                            format='%d/%m/%y %H:%M:%S', 
-                            dayfirst=True, 
-                            errors='coerce')    
+    # Convert and normalize dates
+    df['Data_Normalizada'] = pd.to_datetime(
+        df['Data de Criação'],
+        format='mixed',
+        dayfirst=True,
+        errors='coerce'
+    )
     
-    # Agora você pode usar selected_period
+    # Format display date string
+    df['Data de Criação'] = df['Data_Normalizada'].dt.strftime('%d/%m/%y %H:%M:%S')
+    
+    # Filter based on selected period
     if selected_period == 'Último mês':
         start_date = today - timedelta(days=30)
-        mask = temp_dates >= start_date
+        mask = df['Data_Normalizada'].dt.normalize() >= start_date
         df_filtered = df[mask]
+    elif selected_period == 'Últimos 14 dias':
+        start_date = today - timedelta(days=14)
+        mask = df['Data_Normalizada'].dt.normalize() >= start_date
+        df_filtered = df[mask]
+    elif selected_period == 'Últimos 7 dias':
+        start_date = today - timedelta(days=7)
+        mask = df['Data_Normalizada'].dt.normalize() >= start_date
+        df_filtered = df[mask]
+    elif selected_period == 'Ontem':
+        yesterday = today - timedelta(days=1)
+        mask = df['Data_Normalizada'].dt.normalize() == yesterday
+        df_filtered = df[mask]
+    elif selected_period == 'Hoje':
+        mask = df['Data_Normalizada'].dt.normalize() == today
+        df_filtered = df[mask]
+    else:  # 'Completo'
+        df_filtered = df.copy()
 
     if 'df' not in st.session_state:
         if dados_salvos:
@@ -385,7 +484,12 @@ def painel_mensagem():
     def salvar_dados_no_redis(redis_client, df):
         for _, row in df.iterrows():
             phone_number = row['Número de WhatsApp']
-            redis_client.set(f"dashboard_dados:{phone_number}", json.dumps(row.to_dict()))  # Salva o DataFrame como JSON no Redis
+            # Convert row to dictionary and handle Timestamp objects
+            row_dict = row.to_dict()
+            for key, value in row_dict.items():
+                if isinstance(value, pd.Timestamp):
+                    row_dict[key] = value.strftime('%d/%m/%y %H:%M:%S')
+            redis_client.set(f"dashboard_dados:{phone_number}", json.dumps(row_dict))
 
     
     # Função para salvar o estado dos checks no Redis
@@ -404,20 +508,35 @@ def painel_mensagem():
                 df.at[i, 'Selecionado'] = check_value.decode('utf-8') == 'True'  # Converte string para booleano
 
     # Carregar dados salvos do Redis ou session_state    
+    # Primeiro, obter os números históricos com timestamps
+    historic_data = get_historic_phone_numbers(redis_client)
+    
+    # Depois, carregar os dados salvos do Redis
     dados_salvos = restaurar_dados_do_redis(redis_client)
     if 'df' not in st.session_state:
         if dados_salvos:
             df = pd.DataFrame(dados_salvos)
             
-            # Verificar se a coluna existe antes de tentar acessá-la
-            if 'Data de Criação' in df.columns:
-                # Aplicar a normalização da data e ordenar
-                df['Data de Criação'] = df['Data de Criação'].apply(lambda x: normalizar_data(x) if x else '')
-                df = df.sort_values(by='Data de Criação', ascending=False)
-            else:
-                # Criar a coluna se não existir
-                df['Data de Criação'] = ''
-                
+            # Criar um dicionário de datas de criação dos números históricos
+            historic_dates = {item['phone_number']: item['Data de Criação'] for item in historic_data}
+            
+            # Atualizar as datas de criação no DataFrame
+            df['Data de Criação'] = df['Número de WhatsApp'].map(historic_dates)
+            
+            # Garantir que todas as datas estão no formato correto
+            df['Data_Normalizada'] = pd.to_datetime(
+                df['Data de Criação'],
+                format='%d/%m/%y %H:%M:%S',
+                errors='coerce'
+            )
+            
+            # Reordenar o DataFrame usando a coluna normalizada
+            df = df.sort_values(by='Data_Normalizada', ascending=False)
+            
+            # Formatar a coluna de exibição
+            df['Data de Criação'] = df['Data_Normalizada'].dt.strftime('%d/%m/%y %H:%M:%S')
+            df = df.drop('Data_Normalizada', axis=1)
+            
             st.session_state['df'] = df
         else:
             # Criar DataFrame vazio com as colunas necessárias
@@ -440,39 +559,65 @@ def painel_mensagem():
 
     # Função para normalizar a data
     def normalizar_data(data_string):
-        if pd.isna(data_string) or not data_string:
-            return ''
         try:
-            # Tenta converter para datetime
-            data_formatada = pd.to_datetime(data_string, format='%d/%m/%y %H:%M:%S', dayfirst=True)
-            return data_formatada.strftime('%d/%m/%y %H:%M:%S')
-        except:
-            try:
-                # Tenta converter timestamp
-                data_formatada = pd.to_datetime(int(data_string), unit='s')
-                return data_formatada.strftime('%d/%m/%y %H:%M:%S')
-            except:
+            # Verifica se a data está vazia ou contém uma mensagem de erro
+            if pd.isnull(data_string) or not data_string or data_string.strip() == "" or "Erro" in str(data_string):
                 return ''
+        
+            # Remove espaços extras e caracteres inválidos
+            data_string = str(data_string).strip()
+        
+            # Lista de formatos de data para tentar
+            date_formats = [
+                '%d/%m/%y %H:%M:%S',
+                '%d/%m/%y',
+                '%Y-%m-%d %H:%M:%S',
+                '%Y-%m-%d'
+            ]
+        
+            # Tenta converter timestamp UNIX primeiro
+            try:
+                data_timestamp = float(data_string)
+                return pd.to_datetime(data_timestamp, unit='s').strftime('%d/%m/%y %H:%M:%S')
+            except (ValueError, TypeError):
+                # Se não for timestamp, tenta outros formatos
+                for fmt in date_formats:
+                    try:
+                        data_formatada = pd.to_datetime(data_string, format=fmt, dayfirst=True)
+                        return data_formatada.strftime('%d/%m/%y %H:%M:%S')
+                    except (ValueError, TypeError):
+                        continue
+        
+            # Se nenhum formato funcionar, tenta parse automático
+            try:
+                data_formatada = pd.to_datetime(data_string, dayfirst=True)
+                return data_formatada.strftime('%d/%m/%y %H:%M:%S')
+            except (ValueError, TypeError):
+                return ''
+        
+        except Exception as e:
+            print(f"Erro ao converter a data: {data_string} - {e}")
+            return ''
 
     # Aplicar o filtro de acordo com o período selecionado
     if selected_period == 'Último mês':
         start_date = today - timedelta(days=30)
-        mask = temp_dates >= start_date
+        mask = df['Data_Normalizada'] >= start_date
         df_filtered = df[mask]
     elif selected_period == 'Últimos 14 dias':
         start_date = today - timedelta(days=14)
-        mask = temp_dates >= start_date
+        mask = df['Data_Normalizada'] >= start_date
         df_filtered = df[mask]
     elif selected_period == 'Últimos 7 dias':
         start_date = today - timedelta(days=7)
-        mask = temp_dates >= start_date
+        mask = df['Data_Normalizada'] >= start_date
         df_filtered = df[mask]
     elif selected_period == 'Ontem':
         yesterday = today - timedelta(days=1)
-        mask = temp_dates.dt.date == yesterday.date()
+        mask = df['Data_Normalizada'].dt.date == yesterday.date()
         df_filtered = df[mask]
     elif selected_period == 'Hoje':
-        mask = temp_dates.dt.date == today.date()
+        mask = df['Data_Normalizada'].dt.date == today.date()
         df_filtered = df[mask]
     else:
         df_filtered = df  # 'Completo', não aplica filtro
@@ -491,7 +636,7 @@ def painel_mensagem():
         data = []
         for item in historic_phone_numbers:
             phone_number = item['phone_number']
-            data_criacao = item['created_at']
+            data_criacao = item['Data de Criação']
             normalized_phone_number = normalize_phone_number(phone_number)
 
             # Verificar se o número já existe no dataframe anterior
@@ -564,7 +709,7 @@ def painel_mensagem():
                 if not previous_data.empty:
                     updated_row = previous_data.iloc[0].to_dict()
                     updated_row.update({
-                        'Data de Criação': normalizar_data(data_ia),
+                        'Data de Criação': normalizar_data(str(data_criacao)),
                         'Resumo da Conversa (IA) 🤖': resumo,
                         'Mensagens': mensagens_texto,
                         'Nº User Messages': user_message_count,
@@ -576,7 +721,7 @@ def painel_mensagem():
                 else:
                     updated_row = {
                         'Selecionado': False,
-                        'Data de Criação': normalizar_data(data_ia),
+                        'Data de Criação': normalizar_data(str(data_criacao)),
                         'Nome do usuário': user_data,
                         'Status': classificacao,
                         'Número de WhatsApp': normalized_phone_number,
@@ -704,13 +849,29 @@ def dashboard_bi():
     # Obter a data atual
     today = datetime.today()
 
-    # More flexible date conversion
-    df_conversas['Data de Criação'] = pd.to_datetime(
-        df_conversas['Data de Criação'],
-        format='mixed',  # Allow mixed formats
-        dayfirst=True,
-        errors='coerce'
-    )
+    # Convert and normalize dates with proper error handling
+    def safe_date_conversion(date_str):
+        try:
+            if pd.isna(date_str) or not date_str:
+                return pd.NaT
+            if isinstance(date_str, (int, float)):
+                return pd.to_datetime(date_str, unit='s')
+            return pd.to_datetime(date_str, format='mixed', dayfirst=True)
+        except Exception:
+            try:
+                return pd.to_datetime(date_str, dayfirst=True)
+            except Exception:
+                return pd.NaT
+
+    df_conversas['Data de Criação'] = df_conversas['Data de Criação'].apply(safe_date_conversion)
+    
+    # Store normalized datetime for filtering
+    df_conversas['Data_Normalizada'] = df_conversas['Data de Criação']
+    
+    # Format display date string with proper handling of NaT values
+    df_conversas['Data de Criação'] = df_conversas['Data de Criação'].apply(
+        lambda x: x.strftime('%d/%m/%y %H:%M:%S') if pd.notna(x) else '')
+
 
     # Remove timezone info for consistent comparison
     today = datetime.today().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -718,22 +879,22 @@ def dashboard_bi():
     # Filter with more robust date handling
     if selected_period == 'Último mês':
         start_date = today - timedelta(days=30)
-        mask = df_conversas['Data de Criação'].dt.normalize() >= start_date
+        mask = df_conversas['Data_Normalizada'].dt.normalize() >= start_date
         df_filtered = df_conversas[mask]
     elif selected_period == 'Últimos 14 dias':
         start_date = today - timedelta(days=14)
-        mask = df_conversas['Data de Criação'].dt.normalize() >= start_date
+        mask = df_conversas['Data_Normalizada'].dt.normalize() >= start_date
         df_filtered = df_conversas[mask]
     elif selected_period == 'Últimos 7 dias':
         start_date = today - timedelta(days=7)
-        mask = df_conversas['Data de Criação'].dt.normalize() >= start_date
+        mask = df_conversas['Data_Normalizada'].dt.normalize() >= start_date
         df_filtered = df_conversas[mask]
     elif selected_period == 'Ontem':
         yesterday = today - timedelta(days=1)
-        mask = df_conversas['Data de Criação'].dt.normalize() == yesterday
+        mask = df_conversas['Data_Normalizada'].dt.normalize() == yesterday
         df_filtered = df_conversas[mask]
     elif selected_period == 'Hoje':
-        mask = df_conversas['Data de Criação'].dt.normalize() == today
+        mask = df_conversas['Data_Normalizada'].dt.normalize() == today
         df_filtered = df_conversas[mask]
     else:  # 'Completo'
         df_filtered = df_conversas
