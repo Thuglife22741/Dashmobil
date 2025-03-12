@@ -843,11 +843,27 @@ def dashboard_bi():
     try:
         # Ensure data directory path is resolved correctly
         data_dir = Path(__file__).parent.resolve() / 'data'
-        df_conversas = pd.read_csv(data_dir / 'relatorios_conversas.csv')
-        df_ddd_estado = pd.read_csv(data_dir / 'ddd_estado_brasil.csv', encoding='utf-8')
+        relatorios_path = data_dir / 'relatorios_conversas.csv'
+        ddd_estado_path = data_dir / 'ddd_estado_brasil.csv'
+        
+        if not relatorios_path.exists() or not ddd_estado_path.exists():
+            st.error("Arquivos CSV necessários não encontrados.")
+            st.info("Por favor, verifique se os arquivos 'relatorios_conversas.csv' e 'ddd_estado_brasil.csv' estão presentes na pasta 'data'.")
+            st.stop()
+            
+        df_conversas = pd.read_csv(relatorios_path)
+        df_ddd_estado = pd.read_csv(ddd_estado_path, encoding='utf-8')
+        
+        if df_conversas.empty or df_ddd_estado.empty:
+            st.warning("Os arquivos CSV estão vazios. Por favor, verifique o conteúdo dos arquivos.")
+            return
+            
+    except pd.errors.EmptyDataError:
+        st.error("Os arquivos CSV estão vazios ou mal formatados.")
+        st.stop()
     except Exception as e:
-        st.error(f"Erro ao carregar arquivos CSV: {e}")
-        st.info("Certifique-se de que os arquivos CSV estão presentes na pasta 'data'")
+        st.error(f"Erro ao carregar arquivos CSV: {str(e)}")
+        st.info("Verifique se os arquivos CSV estão no formato correto e não estão corrompidos.")
         st.stop()
 
     # Mesclar os dados de DDD com estado
