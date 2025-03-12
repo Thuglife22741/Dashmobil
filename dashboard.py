@@ -814,8 +814,12 @@ def painel_mensagem():
         salvar_checks_no_redis(redis_client, updated_df)
         st.toast("Seleções salvas com sucesso!", icon="✅")
     
+    # Ensure data directory exists before saving
+    data_dir = Path("data")
+    data_dir.mkdir(exist_ok=True)
+    
     # Salvar o dataframe em um arquivo CSV após gerar a tabela
-    csv_file_path = "data/relatorios_conversas.csv"
+    csv_file_path = data_dir / "relatorios_conversas.csv"
     df.to_csv(csv_file_path, index=False)
     st.toast((f"Relatório salvo como {csv_file_path}"), icon="✅")
 
@@ -823,7 +827,7 @@ def painel_mensagem():
     st.download_button(
         label="Baixar relatório em CSV",
         data=df.to_csv(index=False).encode('utf-8'),
-        file_name=csv_file_path,
+        file_name=str(csv_file_path),
         mime='text/csv'
     )
 
