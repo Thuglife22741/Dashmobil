@@ -840,8 +840,13 @@ def dashboard_bi():
     )
 
     # Carregar arquivos CSV
-    df_conversas = pd.read_csv('data/relatorios_conversas.csv')
-    df_ddd_estado = pd.read_csv('data/ddd_estado_brasil.csv')
+    try:
+        df_conversas = pd.read_csv('data/relatorios_conversas.csv')
+        df_ddd_estado = pd.read_csv('data/ddd_estado_brasil.csv')
+    except Exception as e:
+        st.error(f"Erro ao carregar arquivos CSV: {e}")
+        st.info("Certifique-se de que os arquivos CSV estão presentes na pasta 'data'")
+        st.stop()
 
     # Mesclar os dados de DDD com estado
     df_conversas = df_conversas.merge(df_ddd_estado, how='left', on='DDD')
