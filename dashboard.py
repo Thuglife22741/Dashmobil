@@ -489,6 +489,8 @@ def painel_mensagem():
             for key, value in row_dict.items():
                 if isinstance(value, pd.Timestamp):
                     row_dict[key] = value.strftime('%d/%m/%y %H:%M:%S')
+                elif pd.isna(value):
+                    row_dict[key] = None
             redis_client.set(f"dashboard_dados:{phone_number}", json.dumps(row_dict))
 
     
@@ -1083,5 +1085,3 @@ elif pagina_selecionada == "Configurações":
 
 
 # streamlit run dashboard.py
-
-
